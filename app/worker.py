@@ -9,30 +9,52 @@ from yt_dlp import YoutubeDL
 MAX_BYTES = int(os.environ.get('MAX_BYTES', 150 * 1024 * 1024))
 
 
+def _is_explicitly_watermarked(f):
+    """Reject only formats the extractor explicitly labels watermarked.
+
+    Format IDs like ``download_addr`` aren't proof of a watermark on their own.
+    """
+    fid = str(f.get('format_id') or '').lower()
+    note = str(f.get('format_note') or '').lower()
+    label = f'{fid} {note}'
+    if any(term in label for term in ('no_watermark', 'nowm', 'without watermark', 'no watermark', 'watermark-free')):
+        return False
+    return ('watermarked' in label or 'with watermark' in label or
+            bool(re.search(r'(^|[_\s-])wm([_\s-]|$)', label)))
+
+
 def pick_clean_format(info):
-    """Prefer non-watermarked video streams; labels are not pixel-level proof."""
+    """Choose the best *not explicitly watermarked* TikTok video format.
+
+    TikTok's yt-dlp extractor also produces format IDs such as
+    h264_540p_... and bytevc1_1080p_..., not just play/download/nowm.
+    A missing watermark label is NOT proof the actual frames are clean.
+    """
     candidates = []
     for f in info.get('formats') or []:
-        fid = str(f.get('format_id') or '').lower()
+        fid = str(f.get('format_id') or '')
+        if not fid or f.get('vcodec') in (None, 'none') or _is_explicitly_watermarked(f):
+            continue
+        if not f.get('url'):
+            continue
+        # Stay with actual downloadable video, not a storyboard/thumbnail.
+        ext = str(f.get('ext') or '').lower()
+        if ext in ('mhtml', 'jpg', 'jpeg', 'png', 'webp'):
+            continue
         note = str(f.get('format_note') or '').lower()
-        if not fid or f.get('vcodec') in (None, 'none'):
-            continue
-        desc = f'{fid} {note}'
-        # Refuse formats explicitly identified as containing a watermark.
-        # Do NOT exclude every format with 'download' in its name: some are clean.
-        if ('watermarked' in desc or 'with watermark' in desc or
-                re.search(r'(^|[_\s-])wm([_\s-]|$)', desc)) and not any(
-                    k in desc for k in ('no_watermark', 'nowm', 'without watermark')):
-            continue
-        # Only allow supported TikTok video streams, not arbitrary unknown formats.
-        is_play = 'play' in fid or 'play' in note
-        is_clean_download = 'download' in fid or 'download' in note
-        if not (is_play or is_clean_download or 'nowm' in desc or 'no_watermark' in desc):
-            continue
-        priority = 2 if is_play or 'nowm' in desc or 'no_watermark' in desc else 1
-        score = (priority, (f.get('width') or 0) * (f.get('height') or 0), f.get('tbr') or 0)
-        candidates.append((score, str(f['format_id'])))
-    return max(candidates)[1] if candidates else None
+        fid_lower = fid.lower()
+        explicit_clean = any(x in (fid_lower + ' ' + note) for x in ('nowm', 'no_watermark', 'without watermark', 'no watermark'))
+        # Prioritize explicit clean streams; otherwise prioritize resolution.
+        # The latter is a best-effort choice, not a verified no-watermark promise.
+        score = (
+            int(explicit_clean),
+            (f.get('width') or 0) * (f.get('height') or 0),
+            f.get('height') or 0,
+            f.get('tbr') or 0,
+            int(f.get('acodec') not in (None, 'none')),
+        )
+        candidates.append((score, fid))
+    return max(candidates, key=lambda item: item[0])[1] if candidates else None
 
 
 def classify_error(exc):
@@ -64,7 +86,12 @@ def run(url, folder):
         raise ValueError('Chỉ hỗ trợ một video TikTok công khai')
     fmt = pick_clean_format(info)
     if not fmt:
-        raise ValueError('Không tìm thấy nguồn phát được đánh dấu không watermark')
+        formats = info.get('formats') or []
+        videos = [f for f in formats if f.get('vcodec') not in (None, 'none')]
+        marked = [f for f in videos if _is_explicitly_watermarked(f)]
+        # Print aggregate counts only, never links, signed media URLs or tokens.
+        print(f'FORMAT_DIAGNOSTIC total={len(formats)} video={len(videos)} explicitly_watermarked={len(marked)} unrecognized={len(videos)-len(marked)}', file=sys.stderr, flush=True)
+        raise ValueError('Không tìm thấy nguồn phát không bị đánh dấu watermark')
     # Reuse extracted metadata to avoid a second URL extraction/redirect.
     with YoutubeDL(dict(params, format=fmt)) as ydl:
         ydl.process_ie_result(info, download=True)
