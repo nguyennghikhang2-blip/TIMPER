@@ -1,0 +1,13 @@
+services:
+  - type: web
+    name: tiktok-save-private
+    runtime: docker
+    plan: free
+    healthCheckPath: /health
+    envVars:
+      - key: RATE_LIMIT
+        value: "5"
+      - key: MAX_BYTES
+        value: "104857600"
+      - key: DOWNLOAD_TIMEOUT
+        value: "85"
