@@ -93,7 +93,18 @@ async def run_worker(url: str, folder: str) -> Path:
         await proc.communicate()
         raise
     if proc.returncode != 0:
-        raise ValueError('Không tìm thấy video công khai ở nguồn phù hợp. Hãy thử video khác.')
+        # Worker emits only a safe diagnostic code; never return raw stderr.
+        code = _.decode('utf-8', errors='replace').strip().splitlines()[-1:] if _ else []
+        code = code[0] if code else 'DOWNLOAD_FAILED'
+        errors = {
+            'SOURCE_BLOCKED': 'TikTok có thể đang chặn địa chỉ IP của máy chủ Render (403/429).',
+            'EXTRACTION_FAILED': 'Không trích xuất được dữ liệu video từ TikTok. Có thể TikTok đã đổi cách cung cấp dữ liệu.',
+            'NETWORK_ERROR': 'Máy chủ không kết nối được tới nguồn video TikTok.',
+            'NO_CLEAN_FORMAT': 'Không tìm thấy luồng video phù hợp để ưu tiên tải không watermark.',
+            'DOWNLOAD_FAILED': 'Không tải được tệp video từ nguồn TikTok. Hãy xem nhật ký Render.'
+        }
+        print(f'TikTok download diagnostic: {code if code in errors else "DOWNLOAD_FAILED"}', file=sys.stderr, flush=True)
+        raise ValueError(errors.get(code, errors['DOWNLOAD_FAILED']))
     try:
         name = json.loads(stdout.decode('utf-8'))['filename']
         file = (Path(folder) / name).resolve()

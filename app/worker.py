@@ -1,6 +1,7 @@
 """Isolated child process. Exits with nonzero status on download failure."""
 import json
 import os
+import re
 import sys
 from pathlib import Path
 from yt_dlp import YoutubeDL
@@ -9,21 +10,43 @@ MAX_BYTES = int(os.environ.get('MAX_BYTES', 150 * 1024 * 1024))
 
 
 def pick_clean_format(info):
-    """Prefer play/no-watermark streams; never claim pixel-level verification."""
+    """Prefer non-watermarked video streams; labels are not pixel-level proof."""
     candidates = []
     for f in info.get('formats') or []:
         fid = str(f.get('format_id') or '').lower()
         note = str(f.get('format_note') or '').lower()
-        if not f.get('format_id') or f.get('vcodec') in (None, 'none'):
+        if not fid or f.get('vcodec') in (None, 'none'):
             continue
         desc = f'{fid} {note}'
-        if any(word in desc for word in ('watermark', 'download', 'wm_')) and 'no_watermark' not in desc:
+        # Refuse formats explicitly identified as containing a watermark.
+        # Do NOT exclude every format with 'download' in its name: some are clean.
+        if ('watermarked' in desc or 'with watermark' in desc or
+                re.search(r'(^|[_\s-])wm([_\s-]|$)', desc)) and not any(
+                    k in desc for k in ('no_watermark', 'nowm', 'without watermark')):
             continue
-        if not any(word in desc for word in ('play', 'nowm', 'no_watermark')):
+        # Only allow supported TikTok video streams, not arbitrary unknown formats.
+        is_play = 'play' in fid or 'play' in note
+        is_clean_download = 'download' in fid or 'download' in note
+        if not (is_play or is_clean_download or 'nowm' in desc or 'no_watermark' in desc):
             continue
-        score = ((f.get('width') or 0) * (f.get('height') or 0), f.get('tbr') or 0)
+        priority = 2 if is_play or 'nowm' in desc or 'no_watermark' in desc else 1
+        score = (priority, (f.get('width') or 0) * (f.get('height') or 0), f.get('tbr') or 0)
         candidates.append((score, str(f['format_id'])))
     return max(candidates)[1] if candidates else None
+
+
+def classify_error(exc):
+    """Emit only a safe diagnostic code; never expose URLs/tokens in public logs."""
+    message = str(exc).lower()
+    if 'không tìm thấy nguồn phát' in message:
+        return 'NO_CLEAN_FORMAT'
+    if any(s in message for s in ('ip address is blocked', '403 forbidden', 'http error 403', 'http error 429', 'too many requests')):
+        return 'SOURCE_BLOCKED'
+    if any(s in message for s in ('unable to extract', 'failed to parse', 'no video formats', 'unsupported url', 'no formats')):
+        return 'EXTRACTION_FAILED'
+    if any(s in message for s in ('timed out', 'temporary failure', 'connection error', 'name resolution', 'network is unreachable')):
+        return 'NETWORK_ERROR'
+    return 'DOWNLOAD_FAILED'
 
 
 def run(url, folder):
@@ -54,7 +77,7 @@ def run(url, folder):
 if __name__ == '__main__':
     try:
         run(sys.argv[1], sys.argv[2])
-    except Exception:
-        # No traceback/URLs/cookies in client-facing error.
-        print('Không thể tải video. TikTok có thể đã thay đổi hoặc không cung cấp nguồn phù hợp.', file=sys.stderr)
+    except Exception as exc:
+        # Safe diagnostic classification. Do not leak signed media URLs or cookies.
+        print(classify_error(exc), file=sys.stderr, flush=True)
         sys.exit(1)
